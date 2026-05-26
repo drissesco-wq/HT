@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Halifax Transit • Live Departures</title>
+  <title>Halifax Transit • LIVE Departures</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/protobufjs/7.2.5/protobuf.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
     body { font-family: 'VT323', monospace; }
@@ -18,10 +19,10 @@
     <div class="flex justify-between items-center mb-6 border-b border-green-500 pb-4">
       <div>
         <h1 class="text-5xl font-bold led">HALIFAX TRANSIT</h1>
-        <p class="text-green-400 text-xl">LIVE DEPARTURES • REAL-TIME</p>
+        <p class="text-green-400 text-xl">LIVE DEPARTURES • STOP-SPECIFIC</p>
       </div>
       <div class="text-right">
-        <div id="last-updated" class="text-green-400 text-lg">Last updated: just now</div>
+        <div id="last-updated" class="text-green-400 text-lg">Loading live data...</div>
         <div class="text-xs text-green-600">Stop #<span id="stop-number-display" class="font-bold">1234</span></div>
       </div>
     </div>
@@ -30,18 +31,17 @@
     <div class="flex gap-3 mb-8">
       <input id="stop-input" 
              type="text" 
-             placeholder="Enter 4-digit stop number (e.g. 1234)"
+             maxlength="4"
+             placeholder="Enter 4-digit stop number"
              class="flex-1 bg-gray-900 text-green-400 border border-green-500 rounded px-4 py-3 text-2xl focus:outline-none focus:border-green-300">
       <button onclick="getDepartures()" 
-              class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET</button>
+              class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET LIVE</button>
     </div>
 
-    <!-- Service Alert -->
-    <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl">
-      🚨 Service Alert: Route 7 delayed due to construction on Barrington St.
-    </div>
+    <!-- Alert -->
+    <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl"></div>
 
-    <!-- Departures Table -->
+    <!-- Table -->
     <div class="bg-gray-950 rounded border border-green-600 overflow-hidden">
       <table class="w-full text-left">
         <thead>
@@ -57,24 +57,85 @@
     </div>
 
     <div class="text-center text-green-600 text-sm mt-8">
-      Auto-refresh every 20 seconds • Data from Halifax Transit GTFS-RT
+      Auto-refresh every 20 seconds • Live GTFS-RT from Halifax Transit
     </div>
   </div>
 
   <script>
-    // Mock Halifax data (realistic routes & stops)
-    let mockData = [
-      { route: "1", destination: "Spring Garden & Barrington", due: "3 min", status: "On time" },
-      { route: "2", destination: "Mumford Terminal", due: "8 min", status: "On time" },
-      { route: "7", destination: "Bayers Lake", due: "12 min", status: "Delayed" },
-      { route: "9", destination: "Dartmouth Bridge Terminal", due: "1 min", status: "Arriving" },
-      { route: "10", destination: "Mic Mac Mall", due: "22 min", status: "On time" }
-    ];
+    const gtfsProto = `
+      syntax = "proto2";
+      package transit_realtime;
+      message FeedMessage { required FeedHeader header = 1; repeated FeedEntity entity = 2; }
+      message FeedHeader { required string gtfs_realtime_version = 1; }
+      message FeedEntity { required string id = 1; optional TripUpdate trip_update = 3; }
+      message TripUpdate { required TripDescriptor trip = 1; repeated StopTimeUpdate stop_time_update = 2; }
+      message TripDescriptor { optional string route_id = 5; optional string trip_headsign = 7; }
+      message StopTimeUpdate { optional string stop_id = 4; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
+      message StopTimeEvent { optional int64 delay = 1; optional int64 time = 2; }
+    `;
 
-    function renderDepartures(data) {
+    async function fetchLiveData(stopId) {
+      try {
+        const proxyUrl = "https://corsproxy.io/?https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
+        const response = await fetch(proxyUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = new Uint8Array(arrayBuffer);
+
+        const root = await protobuf.parse(gtfsProto).root;
+        const FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+        const message = FeedMessage.decode(buffer);
+
+        const departures = [];
+
+        message.entity.forEach(entity => {
+          if (entity.trip_update && entity.trip_update.stop_time_update) {
+            const trip = entity.trip_update.trip;
+            const updates = entity.trip_update.stop_time_update;
+
+            updates.forEach(update => {
+              if (update.stop_id && String(update.stop_id) === String(stopId)) {
+                const event = update.departure || update.arrival;
+                if (event && event.time) {
+                  const timeMs = event.time * 1000;
+                  const dueMinutes = Math.max(0, Math.round((timeMs - Date.now()) / 60000));
+                  const delayMin = (event.delay || 0) / 60;
+
+                  let status = "On time";
+                  if (delayMin > 2) status = "Delayed";
+                  else if (delayMin < -2) status = "Early";
+
+                  departures.push({
+                    route: trip.route_id || "—",
+                    destination: trip.trip_headsign || "Unknown",
+                    due: dueMinutes + " min",
+                    status: status
+                  });
+                }
+              }
+            });
+          }
+        });
+
+        // Sort by soonest and limit to next 12 buses
+        return departures
+          .sort((a, b) => parseInt(a.due) - parseInt(b.due))
+          .slice(0, 12);
+
+      } catch (e) {
+        console.error("Live data fetch error", e);
+        return [];
+      }
+    }
+
+    function renderDepartures(data, stopId) {
       const tbody = document.getElementById('departures-body');
       tbody.innerHTML = '';
-      
+
+      if (data.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or check back soon.</td></tr>`;
+        return;
+      }
+
       data.forEach(item => {
         const row = document.createElement('tr');
         row.className = 'border-b border-green-900 hover:bg-gray-900';
@@ -90,57 +151,35 @@
         `;
         tbody.appendChild(row);
       });
-      
-      // Update timestamp
+
       document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString('en-CA', {hour:'numeric', minute:'2-digit'})}`;
     }
 
-    // Fake live refresh
-    function liveRefresh() {
-      // Slightly randomize times so it feels live
-      const updatedData = mockData.map(bus => {
-        let mins = parseInt(bus.due);
-        if (mins > 1) mins = Math.max(1, mins - Math.floor(Math.random()*2));
-        return { ...bus, due: mins + " min" };
-      });
-      renderDepartures(updatedData);
-    }
+    window.getDepartures = async function() {
+      let stopId = document.getElementById('stop-input').value.trim();
+      if (!stopId) stopId = "1234";
+      document.getElementById('stop-number-display').textContent = stopId;
 
-    window.getDepartures = function() {
-      const input = document.getElementById('stop-input').value.trim() || "1234";
-      document.getElementById('stop-number-display').textContent = input;
-      
-      // Show different data based on stop number (demo)
-      if (input === "5678") {
-        mockData = [
-          { route: "3", destination: "Clayton Park", due: "5 min", status: "On time" },
-          { route: "4", destination: "Fairview", due: "9 min", status: "On time" }
-        ];
-      } else if (input === "9999") {
-        mockData = [{ route: "—", destination: "No buses scheduled", due: "—", status: "—"}];
-      }
-      
-      renderDepartures(mockData);
-      
-      // Show random alert
-      if (Math.random() > 0.7) {
-        document.getElementById('alert-banner').classList.remove('hidden');
-      } else {
-        document.getElementById('alert-banner').classList.add('hidden');
-      }
+      const liveData = await fetchLiveData(stopId);
+      renderDepartures(liveData, stopId);
+
+      // Optional random alert
+      const alertEl = document.getElementById('alert-banner');
+      alertEl.classList.add('hidden');
     };
 
-    // Auto-refresh every 20 seconds
-    setInterval(() => {
-      if (document.getElementById('departures-body').children.length > 0) {
-        liveRefresh();
-      }
+    // Auto-refresh every 20 seconds using the current stop
+    let currentStop = "1234";
+    setInterval(async () => {
+      const liveData = await fetchLiveData(currentStop);
+      renderDepartures(liveData, currentStop);
     }, 20000);
 
-    // Load default stop on page load
-    window.onload = () => {
+    // Initial load
+    window.onload = async () => {
       document.getElementById('stop-input').value = "1234";
-      getDepartures();
+      currentStop = "1234";
+      await getDepartures();
     };
   </script>
 </body>
