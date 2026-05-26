@@ -19,10 +19,10 @@
     <div class="flex justify-between items-center mb-6 border-b border-green-500 pb-4">
       <div>
         <h1 class="text-5xl font-bold led">HALIFAX TRANSIT</h1>
-        <p class="text-green-400 text-xl">LIVE DEPARTURES • DEBUG MODE</p>
+        <p class="text-green-400 text-xl">LIVE DEPARTURES • STOP-SPECIFIC</p>
       </div>
       <div class="text-right">
-        <div id="last-updated" class="text-green-400 text-lg">Loading...</div>
+        <div id="last-updated" class="text-green-400 text-lg">Loading live data...</div>
         <div class="text-xs text-green-600">Stop #<span id="stop-number-display" class="font-bold">1234</span></div>
       </div>
     </div>
@@ -33,11 +33,8 @@
       <button onclick="getDepartures()" class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET LIVE</button>
     </div>
 
-    <!-- BIG VISIBLE DEBUG BOX -->
+    <!-- DEBUG BOX (you can delete this section later) -->
     <div id="debug" class="debug p-4 rounded mb-6 text-sm font-mono whitespace-pre-wrap overflow-auto max-h-96"></div>
-
-    <!-- Alert -->
-    <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl"></div>
 
     <!-- Table -->
     <div class="bg-gray-950 rounded border border-green-600 overflow-hidden">
@@ -55,7 +52,7 @@
     </div>
 
     <div class="text-center text-green-600 text-sm mt-8">
-      Auto-refresh every 20 seconds • Live GTFS-RT (debug mode)
+      Auto-refresh every 20 seconds • Live from Halifax Transit
     </div>
   </div>
 
@@ -78,14 +75,20 @@
 
       try {
         const feedUrl = "https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(feedUrl)}`;
+        // NEW RELIABLE PROXY
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
 
-        log += `Fetching via corsproxy.io...\n`;
+        log += `Fetching via allorigins.win...\n`;
         const response = await fetch(proxyUrl, { cache: 'no-store' });
-        log += `✅ HTTP ${response.status} - OK\n`;
+        log += `✅ HTTP ${response.status}\n`;
 
         const arrayBuffer = await response.arrayBuffer();
-        log += `✅ Downloaded ${arrayBuffer.byteLength} bytes\n\n`;
+        log += `✅ Downloaded ${arrayBuffer.byteLength} bytes\n`;
+
+        // Safety check — if tiny file, it's an error page
+        if (arrayBuffer.byteLength < 1000) {
+          throw new Error("Proxy returned error page (tiny file) — try again in 30 seconds");
+        }
 
         const buffer = new Uint8Array(arrayBuffer);
         const root = await protobuf.parse(gtfsProto).root;
@@ -94,47 +97,40 @@
 
         log += `✅ Decoded ${message.entity.length} entities\n`;
 
-        const sampleStops = new Set();
-        let matches = 0;
         const departures = [];
+        let matches = 0;
 
-        message.entity.forEach((entity, i) => {
+        message.entity.forEach(entity => {
           if (entity.trip_update?.stop_time_update) {
             const trip = entity.trip_update.trip || {};
             entity.trip_update.stop_time_update.forEach(update => {
-              if (update.stop_id) {
-                sampleStops.add(String(update.stop_id));
-                if (String(update.stop_id) === String(stopId)) {
-                  matches++;
-                  const event = update.departure || update.arrival;
-                  if (event?.time) {
-                    const dueMinutes = Math.max(0, Math.round((event.time * 1000 - Date.now()) / 60000));
-                    const delayMin = (event.delay || 0) / 60;
-                    let status = "On time";
-                    if (delayMin > 2) status = "Delayed";
-                    else if (delayMin < -2) status = "Early";
-                    departures.push({
-                      route: trip.route_id || "—",
-                      destination: trip.trip_headsign || "Unknown",
-                      due: dueMinutes + " min",
-                      status: status
-                    });
-                  }
+              if (String(update.stop_id) === String(stopId)) {
+                matches++;
+                const event = update.departure || update.arrival;
+                if (event?.time) {
+                  const dueMinutes = Math.max(0, Math.round((event.time * 1000 - Date.now()) / 60000));
+                  const delayMin = (event.delay || 0) / 60;
+                  let status = "On time";
+                  if (delayMin > 2) status = "Delayed";
+                  else if (delayMin < -2) status = "Early";
+                  departures.push({
+                    route: trip.route_id || "—",
+                    destination: trip.trip_headsign || "Unknown",
+                    due: dueMinutes + " min",
+                    status: status
+                  });
                 }
               }
             });
           }
         });
 
-        log += `\n📍 Sample stop_ids in feed (first 15): ${Array.from(sampleStops).slice(0,15).join(', ')}\n`;
-        log += `🔎 Searching for stop #${stopId} → ${matches} matches found\n`;
-        log += `📦 ${departures.length} departures ready for display\n`;
-
+        log += `🔎 Stop #${stopId} → ${matches} matches found\n`;
         debugEl.innerHTML = log;
         return departures.sort((a, b) => parseInt(a.due) - parseInt(b.due)).slice(0, 12);
 
       } catch (e) {
-        log += `❌ ERROR: ${e.message}\n`;
+        log += `❌ ${e.message}\n`;
         debugEl.innerHTML = log;
         return [];
       }
@@ -144,7 +140,7 @@
       const tbody = document.getElementById('departures-body');
       tbody.innerHTML = '';
       if (data.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures for stop #${stopId}<br>(see debug box above for details)</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures for stop #${stopId} right now.<br>(see debug box above)</td></tr>`;
         return;
       }
       data.forEach(item => {
