@@ -11,31 +11,30 @@
     body { font-family: 'VT323', monospace; }
     .board { background: #111827; color: #22c55e; }
     .led { text-shadow: 0 0 10px #22c55e; }
+    .debug { background: #1f2937; border: 2px solid #f59e0b; }
   </style>
 </head>
 <body class="board min-h-screen p-4">
   <div class="max-w-4xl mx-auto">
-    <!-- Header -->
     <div class="flex justify-between items-center mb-6 border-b border-green-500 pb-4">
       <div>
         <h1 class="text-5xl font-bold led">HALIFAX TRANSIT</h1>
-        <p class="text-green-400 text-xl">LIVE DEPARTURES • STOP-SPECIFIC</p>
+        <p class="text-green-400 text-xl">LIVE DEPARTURES • DEBUG MODE</p>
       </div>
       <div class="text-right">
-        <div id="last-updated" class="text-green-400 text-lg">Loading live data...</div>
+        <div id="last-updated" class="text-green-400 text-lg">Loading...</div>
         <div class="text-xs text-green-600">Stop #<span id="stop-number-display" class="font-bold">1234</span></div>
       </div>
     </div>
 
-    <!-- Stop Input -->
     <div class="flex gap-3 mb-8">
       <input id="stop-input" type="text" maxlength="4" placeholder="Enter 4-digit stop number" 
              class="flex-1 bg-gray-900 text-green-400 border border-green-500 rounded px-4 py-3 text-2xl focus:outline-none focus:border-green-300">
       <button onclick="getDepartures()" class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET LIVE</button>
     </div>
 
-    <!-- Big visible error box -->
-    <div id="debug" class="bg-red-900 border border-red-400 text-red-200 p-4 rounded mb-6 text-sm font-mono hidden"></div>
+    <!-- BIG VISIBLE DEBUG BOX -->
+    <div id="debug" class="debug p-4 rounded mb-6 text-sm font-mono whitespace-pre-wrap overflow-auto max-h-96"></div>
 
     <!-- Alert -->
     <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl"></div>
@@ -56,80 +55,87 @@
     </div>
 
     <div class="text-center text-green-600 text-sm mt-8">
-      Auto-refresh every 20 seconds • Live GTFS-RT
+      Auto-refresh every 20 seconds • Live GTFS-RT (debug mode)
     </div>
   </div>
 
   <script>
-    // CORRECT minimal GTFS-RT protobuf definition (this was the main bug)
     const gtfsProto = `
       syntax = "proto2";
       package transit_realtime;
       message FeedMessage { required FeedHeader header = 1; repeated FeedEntity entity = 2; }
-      message FeedHeader { required string gtfs_realtime_version = 1; optional uint64 timestamp = 3; }
+      message FeedHeader { required string gtfs_realtime_version = 1; }
       message FeedEntity { required string id = 1; optional TripUpdate trip_update = 3; }
       message TripUpdate { required TripDescriptor trip = 1; repeated StopTimeUpdate stop_time_update = 2; }
       message TripDescriptor { optional string route_id = 5; optional string trip_headsign = 7; }
-      message StopTimeUpdate { optional uint32 stop_sequence = 1; optional string stop_id = 4; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
+      message StopTimeUpdate { optional string stop_id = 4; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
       message StopTimeEvent { optional int64 delay = 1; optional int64 time = 2; }
     `;
 
     async function fetchLiveData(stopId) {
-      const debug = document.getElementById('debug');
-      debug.classList.add('hidden');
-      debug.textContent = '';
+      const debugEl = document.getElementById('debug');
+      let log = `🔍 DEBUG LOG\n\n`;
 
       try {
         const feedUrl = "https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
+        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(feedUrl)}`;
 
+        log += `Fetching via corsproxy.io...\n`;
         const response = await fetch(proxyUrl, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`Proxy error: ${response.status}`);
+        log += `✅ HTTP ${response.status} - OK\n`;
 
         const arrayBuffer = await response.arrayBuffer();
-        const buffer = new Uint8Array(arrayBuffer);
+        log += `✅ Downloaded ${arrayBuffer.byteLength} bytes\n\n`;
 
+        const buffer = new Uint8Array(arrayBuffer);
         const root = await protobuf.parse(gtfsProto).root;
         const FeedMessage = root.lookupType("transit_realtime.FeedMessage");
         const message = FeedMessage.decode(buffer);
 
+        log += `✅ Decoded ${message.entity.length} entities\n`;
+
+        const sampleStops = new Set();
+        let matches = 0;
         const departures = [];
 
-        message.entity.forEach(entity => {
+        message.entity.forEach((entity, i) => {
           if (entity.trip_update?.stop_time_update) {
             const trip = entity.trip_update.trip || {};
-            const updates = entity.trip_update.stop_time_update;
-
-            updates.forEach(update => {
-              if (String(update.stop_id) === String(stopId)) {
-                const event = update.departure || update.arrival;
-                if (event?.time) {
-                  const timeMs = event.time * 1000;
-                  const dueMinutes = Math.max(0, Math.round((timeMs - Date.now()) / 60000));
-                  const delayMin = (event.delay || 0) / 60;
-
-                  let status = "On time";
-                  if (delayMin > 2) status = "Delayed";
-                  else if (delayMin < -2) status = "Early";
-
-                  departures.push({
-                    route: trip.route_id || "—",
-                    destination: trip.trip_headsign || "Unknown",
-                    due: dueMinutes + " min",
-                    status: status
-                  });
+            entity.trip_update.stop_time_update.forEach(update => {
+              if (update.stop_id) {
+                sampleStops.add(String(update.stop_id));
+                if (String(update.stop_id) === String(stopId)) {
+                  matches++;
+                  const event = update.departure || update.arrival;
+                  if (event?.time) {
+                    const dueMinutes = Math.max(0, Math.round((event.time * 1000 - Date.now()) / 60000));
+                    const delayMin = (event.delay || 0) / 60;
+                    let status = "On time";
+                    if (delayMin > 2) status = "Delayed";
+                    else if (delayMin < -2) status = "Early";
+                    departures.push({
+                      route: trip.route_id || "—",
+                      destination: trip.trip_headsign || "Unknown",
+                      due: dueMinutes + " min",
+                      status: status
+                    });
+                  }
                 }
               }
             });
           }
         });
 
+        log += `\n📍 Sample stop_ids in feed (first 15): ${Array.from(sampleStops).slice(0,15).join(', ')}\n`;
+        log += `🔎 Searching for stop #${stopId} → ${matches} matches found\n`;
+        log += `📦 ${departures.length} departures ready for display\n`;
+
+        debugEl.innerHTML = log;
         return departures.sort((a, b) => parseInt(a.due) - parseInt(b.due)).slice(0, 12);
 
       } catch (e) {
-        console.error(e);
-        debug.textContent = `ERROR: ${e.message}\n\nOpen browser console (F12) for more details.`;
-        debug.classList.remove('hidden');
+        log += `❌ ERROR: ${e.message}\n`;
+        debugEl.innerHTML = log;
         return [];
       }
     }
@@ -137,12 +143,10 @@
     function renderDepartures(data, stopId) {
       const tbody = document.getElementById('departures-body');
       tbody.innerHTML = '';
-
       if (data.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or wait 30 seconds.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures for stop #${stopId}<br>(see debug box above for details)</td></tr>`;
         return;
       }
-
       data.forEach(item => {
         const row = document.createElement('tr');
         row.className = 'border-b border-green-900 hover:bg-gray-900';
@@ -151,21 +155,19 @@
           <td class="p-4">${item.destination}</td>
           <td class="p-4 text-right font-bold">${item.due}</td>
           <td class="p-4">
-            <span class="px-3 py-1 rounded text-sm ${item.status === 'On time' ? 'bg-green-600' : item.status === 'Delayed' ? 'bg-red-600' : 'bg-yellow-600'} text-white">
+            <span class="px-3 py-1 rounded text-sm ${item.status === 'On time' ? 'bg-green-600' : 'bg-red-600'} text-white">
               ${item.status}
             </span>
           </td>
         `;
         tbody.appendChild(row);
       });
-
       document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString('en-CA', {hour:'numeric', minute:'2-digit'})}`;
     }
 
     window.getDepartures = async function() {
       let stopId = document.getElementById('stop-input').value.trim() || "1234";
       document.getElementById('stop-number-display').textContent = stopId;
-
       const liveData = await fetchLiveData(stopId);
       renderDepartures(liveData, stopId);
     };
