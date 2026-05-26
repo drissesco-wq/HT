@@ -29,20 +29,16 @@
 
     <!-- Stop Input -->
     <div class="flex gap-3 mb-8">
-      <input id="stop-input" 
-             type="text" 
-             maxlength="4"
-             placeholder="Enter 4-digit stop number"
+      <input id="stop-input" type="text" maxlength="4" placeholder="Enter 4-digit stop number" 
              class="flex-1 bg-gray-900 text-green-400 border border-green-500 rounded px-4 py-3 text-2xl focus:outline-none focus:border-green-300">
-      <button onclick="getDepartures()" 
-              class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET LIVE</button>
+      <button onclick="getDepartures()" class="bg-green-600 hover:bg-green-500 px-8 rounded text-white text-2xl font-bold">GET LIVE</button>
     </div>
+
+    <!-- Big visible error box -->
+    <div id="debug" class="bg-red-900 border border-red-400 text-red-200 p-4 rounded mb-6 text-sm font-mono hidden"></div>
 
     <!-- Alert -->
     <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl"></div>
-
-    <!-- Debug (remove after testing) -->
-    <div id="debug" class="hidden bg-gray-900 border border-red-500 text-red-400 p-3 mb-6 text-sm rounded font-mono"></div>
 
     <!-- Table -->
     <div class="bg-gray-950 rounded border border-green-600 overflow-hidden">
@@ -60,32 +56,35 @@
     </div>
 
     <div class="text-center text-green-600 text-sm mt-8">
-      Auto-refresh every 20 seconds • Live GTFS-RT from Halifax Transit
+      Auto-refresh every 20 seconds • Live GTFS-RT
     </div>
   </div>
 
   <script>
+    // CORRECT minimal GTFS-RT protobuf definition (this was the main bug)
     const gtfsProto = `
       syntax = "proto2";
       package transit_realtime;
       message FeedMessage { required FeedHeader header = 1; repeated FeedEntity entity = 2; }
-      message FeedHeader { required string gtfs_realtime_version = 1; }
+      message FeedHeader { required string gtfs_realtime_version = 1; optional uint64 timestamp = 3; }
       message FeedEntity { required string id = 1; optional TripUpdate trip_update = 3; }
       message TripUpdate { required TripDescriptor trip = 1; repeated StopTimeUpdate stop_time_update = 2; }
       message TripDescriptor { optional string route_id = 5; optional string trip_headsign = 7; }
-      message StopTimeUpdate { optional string stop_id = 1; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
+      message StopTimeUpdate { optional uint32 stop_sequence = 1; optional string stop_id = 4; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
       message StopTimeEvent { optional int64 delay = 1; optional int64 time = 2; }
     `;
 
     async function fetchLiveData(stopId) {
       const debug = document.getElementById('debug');
+      debug.classList.add('hidden');
+      debug.textContent = '';
+
       try {
-        // NEW WORKING PROXY (allorigins.win/raw works on Vercel)
         const feedUrl = "https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
         const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
 
-        const response = await fetch(proxyUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const response = await fetch(proxyUrl, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Proxy error: ${response.status}`);
 
         const arrayBuffer = await response.arrayBuffer();
         const buffer = new Uint8Array(arrayBuffer);
@@ -98,7 +97,7 @@
 
         message.entity.forEach(entity => {
           if (entity.trip_update?.stop_time_update) {
-            const trip = entity.trip_update.trip;
+            const trip = entity.trip_update.trip || {};
             const updates = entity.trip_update.stop_time_update;
 
             updates.forEach(update => {
@@ -129,7 +128,7 @@
 
       } catch (e) {
         console.error(e);
-        debug.textContent = `ERROR: ${e.message}`;
+        debug.textContent = `ERROR: ${e.message}\n\nOpen browser console (F12) for more details.`;
         debug.classList.remove('hidden');
         return [];
       }
@@ -140,7 +139,7 @@
       tbody.innerHTML = '';
 
       if (data.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or check back in a minute.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or wait 30 seconds.</td></tr>`;
         return;
       }
 
@@ -166,7 +165,6 @@
     window.getDepartures = async function() {
       let stopId = document.getElementById('stop-input').value.trim() || "1234";
       document.getElementById('stop-number-display').textContent = stopId;
-      document.getElementById('debug').classList.add('hidden');
 
       const liveData = await fetchLiveData(stopId);
       renderDepartures(liveData, stopId);
