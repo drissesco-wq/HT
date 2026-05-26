@@ -41,6 +41,9 @@
     <!-- Alert -->
     <div id="alert-banner" class="hidden bg-yellow-900 border border-yellow-400 text-yellow-200 p-4 rounded mb-6 text-center text-xl"></div>
 
+    <!-- Debug (remove after testing) -->
+    <div id="debug" class="hidden bg-gray-900 border border-red-500 text-red-400 p-3 mb-6 text-sm rounded font-mono"></div>
+
     <!-- Table -->
     <div class="bg-gray-950 rounded border border-green-600 overflow-hidden">
       <table class="w-full text-left">
@@ -70,14 +73,20 @@
       message FeedEntity { required string id = 1; optional TripUpdate trip_update = 3; }
       message TripUpdate { required TripDescriptor trip = 1; repeated StopTimeUpdate stop_time_update = 2; }
       message TripDescriptor { optional string route_id = 5; optional string trip_headsign = 7; }
-      message StopTimeUpdate { optional string stop_id = 4; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
+      message StopTimeUpdate { optional string stop_id = 1; optional StopTimeEvent arrival = 2; optional StopTimeEvent departure = 3; }
       message StopTimeEvent { optional int64 delay = 1; optional int64 time = 2; }
     `;
 
     async function fetchLiveData(stopId) {
+      const debug = document.getElementById('debug');
       try {
-        const proxyUrl = "https://corsproxy.io/?https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
+        // NEW WORKING PROXY (allorigins.win/raw works on Vercel)
+        const feedUrl = "https://gtfs.halifax.ca/realtime/TripUpdate/TripUpdates.pb";
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
+
         const response = await fetch(proxyUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
         const arrayBuffer = await response.arrayBuffer();
         const buffer = new Uint8Array(arrayBuffer);
 
@@ -88,14 +97,14 @@
         const departures = [];
 
         message.entity.forEach(entity => {
-          if (entity.trip_update && entity.trip_update.stop_time_update) {
+          if (entity.trip_update?.stop_time_update) {
             const trip = entity.trip_update.trip;
             const updates = entity.trip_update.stop_time_update;
 
             updates.forEach(update => {
-              if (update.stop_id && String(update.stop_id) === String(stopId)) {
+              if (String(update.stop_id) === String(stopId)) {
                 const event = update.departure || update.arrival;
-                if (event && event.time) {
+                if (event?.time) {
                   const timeMs = event.time * 1000;
                   const dueMinutes = Math.max(0, Math.round((timeMs - Date.now()) / 60000));
                   const delayMin = (event.delay || 0) / 60;
@@ -116,13 +125,12 @@
           }
         });
 
-        // Sort by soonest and limit to next 12 buses
-        return departures
-          .sort((a, b) => parseInt(a.due) - parseInt(b.due))
-          .slice(0, 12);
+        return departures.sort((a, b) => parseInt(a.due) - parseInt(b.due)).slice(0, 12);
 
       } catch (e) {
-        console.error("Live data fetch error", e);
+        console.error(e);
+        debug.textContent = `ERROR: ${e.message}`;
+        debug.classList.remove('hidden');
         return [];
       }
     }
@@ -132,7 +140,7 @@
       tbody.innerHTML = '';
 
       if (data.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or check back soon.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-green-400">No departures found for stop #${stopId} right now.<br>Try another stop or check back in a minute.</td></tr>`;
         return;
       }
 
@@ -156,26 +164,20 @@
     }
 
     window.getDepartures = async function() {
-      let stopId = document.getElementById('stop-input').value.trim();
-      if (!stopId) stopId = "1234";
+      let stopId = document.getElementById('stop-input').value.trim() || "1234";
       document.getElementById('stop-number-display').textContent = stopId;
+      document.getElementById('debug').classList.add('hidden');
 
       const liveData = await fetchLiveData(stopId);
       renderDepartures(liveData, stopId);
-
-      // Optional random alert
-      const alertEl = document.getElementById('alert-banner');
-      alertEl.classList.add('hidden');
     };
 
-    // Auto-refresh every 20 seconds using the current stop
     let currentStop = "1234";
     setInterval(async () => {
       const liveData = await fetchLiveData(currentStop);
       renderDepartures(liveData, currentStop);
     }, 20000);
 
-    // Initial load
     window.onload = async () => {
       document.getElementById('stop-input').value = "1234";
       currentStop = "1234";
